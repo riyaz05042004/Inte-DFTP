@@ -1,0 +1,138 @@
+
+Here are ready-to-run Docker commands to push sample messages into the main stream (status-stream):
+
+Trade-capture with fileId:
+docker exec redis-master redis-cli XADD status-stream "*" payload "{\"fileId\":\"FILE001\",\"sourceservice\":\"trade-capture\",\"status\":\"RECEIVED\"}"
+
+Trade-capture with orderId (no fileId):
+docker exec redis-master redis-cli XADD status-stream "*" payload "{\"orderId\":\"ORDER123\",\"sourceservice\":\"trade-capture\",\"status\":\"RECEIVED\"}"
+
+Other service (no fileId path; requires orderId + distributorId):
+docker exec redis-master redis-cli XADD status-stream "*" payload "{\"orderId\":\"ORDER123\",\"distributor_id\":42,\"sourceservice\":\"order-service\",\"status\":\"COMPLETED\"}"
+
+Other service with fileId (file must already exist in DB):
+docker exec redis-master redis-cli XADD status-stream "*" payload "{\"fileId\":\"FILE001\",\"orderId\":\"ORDER123\",\"distributor_id\":42,\"sourceservice\":\"order-service\",\"status\":\"PROCESSING\"}"
+
+Adjust values as needed; keep the payload JSON quoted as shown.
+-----------------------------------
+# Process to do after Docker UP
+docker exec sentinel1 redis-cli -p 26379 SENTINEL get-master-addr-by-name mymaster
+
+docker exec redis-master redis-cli XADD status-stream "*" payload '{"fileId":"FILE001","sourceservice":"trade-capture","status":"PROCESSING"}'
+
+docker exec redis-master redis-cli XADD status-stream "*" payload '{"fileId":"FILE002","order_id":"ORDER123","distributor_id":"DIST001","sourceservice":"order-service","status":"COMPLETED"}'
+
+{
+    docker exec redis-master redis-cli XADD status-stream "*" payload "{\"fileId\":\"FILE001\",\"sourceservice\":\"trade-capture\",\"status\":\"PROCESSING\"}"
+    docker exec redis-master redis-cli XADD status-stream "*" payload "{\"fileId\":\"FILE001\",\"orderId\":\"ORDER123\",\"firm_id\":\"DIST001\",\"sourceservice\":\"order-service\",\"status\":\"COMPLETED\"}"
+    docker exec redis-master redis-cli XADD status-stream "*" payload "{\"mqid\":\"MQ123\",\"orderId\":\"ORDER1234\",\"firm_id\":\"DIST001\",\"sourceservice\":\"some-service\",\"status\":\"RECEIVED\"}"
+    
+    docker exec redis-master redis-cli XADD status-stream "*" payload "{\"mqid\":\"MQ123\",\"orderId\":\"ORDER1234\",\"firm_id\":\"DIST001\",\"sourceservice\":\"some-service\",\"status\":\"RECEIVED\"}"
+
+
+}
+docker logs status-tracking-app --tail 100
+
+docker exec postgres psql -U postgres -d status_track -c "SELECT * FROM order_state_history ORDER BY id DESC LIMIT 20;"
+
+docker exec postgres psql -U postgres -d status_track -c "ALTER TABLE order_state_history ADD COLUMN mqid VARCHAR;"
+-----------------------------------
+To check data in stream and group info:
+docker exec redis-master redis-cli XRANGE status-stream - +
+-------
+
+Check all ips:
+	
+	docker inspect -f "{{.Name}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" redis-master redis-replica1 redis-replica2
+
+CHeck sentinel listens or not:
+	
+	docker exec sentinel1 redis-cli -p 26379 SENTINEL masters
+
+Enter some data into redis-master:
+	
+	docker exec redis-master redis-cli SET testkey value1
+
+View some data in replica:
+
+	docker exec redis-replica1 redis-cli GET testkey
+	docker exec redis-replica2 redis-cli GET testkey
+
+stop master:
+
+	docker pause redis-master
+
+to check role of replica:
+
+	 docker exec redis-replica1 redis-cli INFO replication
+
+checking changed or not by seeing ip and port:
+	docker exec sentinel1 redis-cli -p 26379 SENTINEL get-master-addr-by-name mymaster
+
+------------------
+
+docker exec -it redis-master redis-cli
+xrange mystream - +
+xlen mystream
+xinfo groups mystream
+xpending mystream mygroup
+-------------------
+
+Push data to stream and check DB:
+	docker exec redis-master redis-cli XADD status-stream "*" payload '{"fileId":"FUND001","sourceservice":"trade-capture","status":"RECEIVED"}'
+
+Check the MS is consumed or not using LOG:
+	docker logs status-tracking-app --tail 50 | findstr /R "New message|Record ID|Data:|ACK SENT|order_state"
+
+to check DB:
+
+	docker exec postgres psql -U postgres -d status_track -c "SELECT id, file_id, order_id, distributor_id, mqid, current_state, source_service, event_time FROM order_state_history ORDER BY id DESC LIMIT 20;"
+
+--------------
+
+## Correct JSON Payload Formats
+
+⚠️ IMPORTANT: Either fileId OR mqid MUST be present (one is required). If neither is present, the message will be skipped.
+
+### 1. Trade-Capture Service (with fileId)
+{
+	fileId: (required - either fileId or mqid must be present)
+	sourceservice: "trade-capture"
+	status: (required)
+}
+
+### 2. Other Services (with fileId or order_id + distributor_id)
+{
+	fileId: (optional - either fileId or mqid must be present)
+	order_id: (required when fileId and mqid both absent)
+	distributor_id: (required when fileId and mqid both absent)
+	sourceservice: (required)
+	status: (required)
+}
+
+### 3. MQID-based Messages (with mqid - no fileId/orderId checks)
+{
+	mqid: (required - either fileId or mqid must be present)
+	distributor_id or firm_id: (optional, will be converted to distributor_id)
+	sourceservice: (required)
+	status: (required)
+}
+
+------------
+REM Stop all running containers
+for /f "tokens=*" %i in ('docker ps -q') do docker stop %i
+
+REM Remove all containers
+for /f "tokens=*" %i in ('docker ps -q -a') do docker rm %i
+
+REM Remove all images
+for /f "tokens=*" %i in ('docker images -q') do docker rmi -f %i
+
+REM Remove all volumes (this deletes databases and Redis data)
+for /f "tokens=*" %i in ('docker volume ls -q') do docker volume rm %i
+
+REM Remove all networks (except default ones)
+for /f "tokens=*" %i in ('docker network ls -q --filter "driver!=bridge" --filter "name!=docker_gwbridge"') do docker network rm %i
+
+REM Final cleanup: prune everything
+docker system prune -a --volumes -f
